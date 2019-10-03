@@ -1,4 +1,4 @@
-# Transfer orphaned messages from DR dc to Main dc
+# Transfer messages between RabbitMQ clusters 
 
 The objective of this repository is first of all to provide an script that transfer messages from one cluster to
 another and second to demonstrate how to run it.
