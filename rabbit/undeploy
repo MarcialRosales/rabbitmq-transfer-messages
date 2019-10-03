@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+SCRIPT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+docker rm -f pc1-okr-rabbitmq 2>/dev/null || echo "pc1-okr-rabbitmq was not running"
+docker rm -f ltm-okr-rabbitmq 2>/dev/null || echo "ltm-okr-rabbitmq was not running"

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -eu
+
+echo ${HTTP_SOURCE_CLUSTER?"Declare HTTP url (hostname:port) for the source cluster"} > /dev/null
+echo ${HTTP_SOURCE_CREDENTIALS?"Declare HTTP credentials for the source cluster"} > /dev/null
+echo ${AMQP_TARGET_CLUSTER?"Declare AMQP URI (amqp://user:password@hostname:port) for the target cluster"} > /dev/null
+
+printf ">>>> Transfer started at $(date)\n\n"
+atempts=0
+until ./_idempotent_transfer
+do
+  atempts=$((atempts+1))
+  printf "\n\n>>>> Waiting 10sec before checking if transfer has completed (attempt #$atempts)\n\n"
+  sleep 10
+done
+
+printf "\n\n>>>> Transfer completed successfully at $(date)\n"

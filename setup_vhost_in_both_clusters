@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -eu
+
+_VHOST=${VHOST:-%2F}
+
+
+echo "Setting up ${_VHOST} on PC1 OKR cluster (this is the target cluster)..."
+./_declare_queues_on_pc1
+
+echo "Setting up ${_VHOST} on LTM OKR cluster (this is the source cluster) ..."
+./_produce_queues_with_messages_on_ltm

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+SCRIPT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+docker network inspect rabbitmq_net >/dev/null 2>&1 || docker network create rabbitmq_net
+docker rm -f pc1-okr-rabbitmq 2>/dev/null || echo "pc1-okr-rabbitmq was not running"
+docker run -d --name pc1-okr-rabbitmq --net rabbitmq_net \
+    -p 15672:15672 -p 5672:5672 \
+    -v $SCRIPT/pc1-okr-rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro \
+    -v $SCRIPT/enabled_plugins:/etc/rabbitmq/enabled_plugins \
+    rabbitmq:3.8-rc-management
+
+docker rm -f ltm-okr-rabbitmq 2>/dev/null || echo "ltm-okr-rabbitmq was not running"
+docker run -d --name ltm-okr-rabbitmq --net rabbitmq_net \
+    -p 15673:15672 -p 5673:5672 \
+    -v $SCRIPT/ltm-okr-rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro \
+    -v $SCRIPT/enabled_plugins:/etc/rabbitmq/enabled_plugins \
+    rabbitmq:3.8-rc-management

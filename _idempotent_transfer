@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+
+set -eu
+
+echo ${HTTP_SOURCE_CLUSTER?"Declare HTTP url (hostname:port) for the source cluster"} > /dev/null
+echo ${HTTP_SOURCE_CREDENTIALS?"Declare HTTP credentials for the source cluster"} > /dev/null
+echo ${AMQP_TARGET_CLUSTER?"Declare AMQP URI (amqp://user:password@hostname:port) for the target cluster"} > /dev/null
+if [ -z ${TARGET_QUEUE+x} ]; then DESTINATION_QUEUE_OR_EMPTY=""; else DESTINATION_QUEUE_OR_EMPTY="\"dest-queue\" : \"$TARGET_QUEUE\","; fi
+HTTP_SKIP_SSL_VALIDATION=${HTTP_SKIP_SSL_VALIDATION:-"-insecure"}
+MAX_ACTIVE_SHOVEL_COUNT=${MAX_ACTIVE_SHOVEL_COUNT:-50}
+
+#echo "Transfer from ${HTTP_SOURCE_CLUSTER} using ${HTTP_SOURCE_CREDENTIALS} to ${AMQP_TARGET_CLUSTER}"
+#echo " curl settings : ${HTTP_SKIP_SSL_VALIDATION}"
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+mkdir -p $DIR/tmp
+TEMP=`mktemp -d "$DIR/tmp/XXXX"`
+echo "> Temporary files generated under $TEMP"
+
+### main function
+main() {
+  if there_are_empty_queues_with_shovels
+  then
+    echo "Transfer of orphaned messages has completed for some queues"
+    terminate_transfer_of_orphaned_messages
+  fi
+
+  if there_are_orphaned_messages;
+  then
+    echo "There are orphaned messages to transfer"
+    disable_federation_upstreams
+    initiate_transfer_orphaned_messages
+    exit 1
+  else
+    echo "There are no orphaned messages to transfer"
+    enable_federation_upstreams
+    exit 0
+  fi
+}
+
+### Queues related functions
+
+find_federated_non_empty_queues() {
+  # find federation policies
+  get "/api/definitions" | tee $TEMP/definitions \
+    | jq -r ' .policies[] | select (.definition | has("federation-upstream")) | .name' \
+     > $TEMP/federation_policies
+
+  # find non-empty queues with a policy applied
+  get "/api/queues" \
+    | jq -r '.[] | select((.messages > 0) and (.policy != null)) ' \
+     > $TEMP/non_empty_queues_with_policy
+
+  # select policy, vhost, queue and messages from each non-empty queue with policy
+  jq -r ' "\(.policy), \(.vhost), \(.name), \(.messages)"' $TEMP/non_empty_queues_with_policy \
+    > $TEMP/SELECT_policy_vhost_queue_messages_FROM_non_empty_queues_with_policy
+
+  # select queues with a federation policy applied
+  grep -Ff $TEMP/federation_policies $TEMP/SELECT_policy_vhost_queue_messages_FROM_non_empty_queues_with_policy \
+    | sort > $TEMP/federated_non_empty_queues
+
+  echo "$TEMP/federated_non_empty_queues"
+}
+
+find_federated_empty_queues() {
+  # find federation policies
+  get "/api/definitions" | tee $TEMP/definitions \
+    | jq -r ' .policies[] | select (.definition | has("federation-upstream")) | .name' \
+     > $TEMP/federation_policies
+
+  # find empty queues with a policy applied
+  get "/api/queues" \
+    | jq -r '.[] | select((.messages < 1) and (.policy != null)) ' \
+     > $TEMP/empty_queues_with_policy
+
+  # select policy, vhost, queue and messages from each empty queue with policy
+  jq -r ' "\(.policy), \(.vhost), \(.name), \(.messages)"' $TEMP/empty_queues_with_policy \
+    > $TEMP/SELECT_policy_vhost_queue_messages_FROM_empty_queues_with_policy
+
+  # select queues with a federation policy applied
+  grep -Ff $TEMP/federation_policies $TEMP/SELECT_policy_vhost_queue_messages_FROM_empty_queues_with_policy \
+    | sort > $TEMP/federated_empty_queues
+
+  echo "$TEMP/federated_empty_queues"
+}
+
+### Federation Upstream related functions
+
+clone_federation_upstreams() {
+  echo "  Clone federation upstreams"
+  jq -r '.parameters[] .name+="-to-restore"' $1 > $TEMP/cloned_federation_upstreams
+  COUNT=`jq '.parameters | length' $TEMP/cloned_federation_upstreams || echo 0`
+  post "/api/definitions" @$TEMP/cloned_federation_upstreams && echo "  Successfully cloned $COUNT federation upstreams"
+}
+delete_cloned_federation_upstreams() {
+  get "/api/parameters/federation-upstream" | \
+   jq '.[] | select(.name | contains("-to-restore"))  ' | jq -r '"\(.name) \(.vhost)"' > $TEMP/federation_upstreams_to_delete
+
+ while read upstream; do  # We can make the while loop to terminate after N queues so that we process up to N queues
+   cancel_federation_upstream $upstream
+ done <$TEMP/federation_upstreams_to_delete
+}
+cancel_federation_upstream() {
+  name=$1
+  vhost=$2
+  vhost_url_encoded=$(urlencode $vhost)
+  delete "/api/parameters/federation-upstream/$vhost_url_encoded/$name" \
+    && echo " Succesfully deleted upstream $name on vhost $vhost"
+}
+cancel_federation_upstreams() {
+  echo "  Cancel Federation upstreams"
+  jq -r '.parameters[] | "\(.name) \(.vhost)"' $1 > $TEMP/federation_streams_to_cancel
+  while read upstream; do  # We can make the while loop to terminate after N queues so that we process up to N queues
+    cancel_federation_upstream $upstream
+  done <$TEMP/federation_streams_to_cancel
+}
+disable_federation_upstreams() {
+  echo "Disable federation upstreams"
+  # It should really disable the upstreams in use but it does not really matter
+  get "/api/parameters/federation-upstream" | \
+   jq '.[] | select(.name | contains("-to-restore") | not )' | jq -s '{ "parameters": . }' > $TEMP/federation_upstreams
+
+  federation_upstreams_count=$(jq -r '.parameters | length ' $TEMP/federation_upstreams)
+  if [ "$federation_upstreams_count" != "0" ]
+  then
+    clone_federation_upstreams $TEMP/federation_upstreams
+    cancel_federation_upstreams $TEMP/federation_upstreams
+  else
+    echo "  There are no upstreams to disable"
+  fi
+}
+restore_federation_upstreams() {
+  get "/api/parameters/federation-upstream" | \
+    jq '.[] | select(.name | contains("-to-restore"))' | \
+      jq -s '{ "parameters": . }' | \
+        jq '.parameters[].name |= sub("-to-restore";"")' > $TEMP/federation_upstreams_to_restore
+
+  COUNT=`jq '.parameters | length' $TEMP/federation_upstreams_to_restore || echo 0`
+  post "/api/definitions" @$TEMP/federation_upstreams_to_restore && echo " Successfully restored $COUNT upstreams"
+
+}
+enable_federation_upstreams() {
+  echo "Enable Federation upstreams"
+  restore_federation_upstreams
+  delete_cloned_federation_upstreams
+}
+
+### Transfer related functions
+
+delete_shovel() {
+  name=$1
+  vhost=$2
+  vhost_url_encoded=$(urlencode $vhost)
+  delete "/api/parameters/shovel/$vhost_url_encoded/$name" \
+    && echo " Succesfully deleted shovel $name in vhost $vhost"
+}
+
+shovel_queue() {
+  vhost=$2
+  queue=$3
+  name="transfer-"$queue
+  messages=$4
+  vhost_url_encoded=$(urlencode $vhost)
+  src_uri="amqp://localhost/$vhost_url_encoded"
+  dest_uri="${AMQP_TARGET_CLUSTER}/${vhost_url_encoded}"
+
+  cat > $TEMP/${vhost_url_encoded}-${name} <<-EOM
+{
+  "value": {
+    "src-protocol": "amqp091",
+    "src-uri":  "$src_uri",
+    "src-queue": "$queue",
+    "dest-protocol": "amqp091",
+    $DESTINATION_QUEUE_OR_EMPTY
+    "dest-uri": "$dest_uri"
+  }
+}
+EOM
+
+  echo "    # Queue \"$queue\" with $messages msg (s) on vhost \"$vhost\" "
+  put "/api/parameters/shovel/$vhost_url_encoded/$name" @$TEMP/${vhost_url_encoded}-${name} \
+   && echo "  Succesfully created shovel $name"
+
+}
+there_are_orphaned_messages() {
+  federated_non_empty_queues="$(find_federated_non_empty_queues)"
+  ([ -f "$federated_non_empty_queues" ] && [ -s "$federated_non_empty_queues" ])
+}
+there_are_empty_queues_with_shovels() {
+  federated_empty_queues="$(find_federated_empty_queues)"
+  ([ -f "$federated_empty_queues" ] && [ -s "$federated_empty_queues" ])
+}
+initiate_transfer_orphaned_messages() {
+  echo "Initiate transfer of orphaned messages"
+
+  # shoveled queues
+  get "/api/shovels" | jq -r '"\(.[].src_queue),"' | sort > $TEMP/queues_with_shovel
+  if [ -f "$TEMP/queues_with_shovel" ] && [ -s "$TEMP/queues_with_shovel" ]
+  then
+    grep -Ff $TEMP/queues_with_shovel $TEMP/federated_non_empty_queues > $TEMP/federated_non_empty_with_shovel
+    # queues to shovel
+    comm -3 $TEMP/federated_non_empty_with_shovel $TEMP/federated_non_empty_queues | tr ',' ' '> $TEMP/queues_without_shovel
+  else
+    # queues to shovel
+    cat $TEMP/federated_non_empty_queues  | tr ',' ' ' > $TEMP/queues_without_shovel
+  fi
+
+  # create shovel for each queue to shovel
+  if [ -f "$TEMP/queues_without_shovel" ] && [ -s "$TEMP/queues_without_shovel" ]
+  then
+    # ACTIVE is the current count of active shovels
+    ACTIVE=`(wc -l $TEMP/federated_non_empty_with_shovel 2>/dev/null || echo 0) | awk '{print $1}'`
+    # TODO is the total count of shovel yet to create
+    TODO=`(wc -l $TEMP/queues_without_shovel 2>/dev/null || echo 0) | awk '{print $1}'`
+    # SHOVEL_TO_CREATE is the total count of shovel to create now.
+    # ACTIVE + SHOVEL_TO_CREATE will never be greater than configured MAX_ACTIVE_SHOVEL_COUNT
+    SHOVEL_TO_CREATE=$(( MAX_ACTIVE_SHOVEL_COUNT - ACTIVE < 1 ? 0 : \
+      ( TODO > (MAX_ACTIVE_SHOVEL_COUNT - ACTIVE) ? MAX_ACTIVE_SHOVEL_COUNT : TODO ) ))
+
+    # take only the shovels we need to create now
+    if (($SHOVEL_TO_CREATE > 0)); then
+      head -${SHOVEL_TO_CREATE} $TEMP/queues_without_shovel > $TEMP/queues_to_shovel
+
+      echo "Currently there are $ACTIVE active shovels. Scheduling $SHOVEL_TO_CREATE shovels out of $TODO."
+
+      while read queue; do  # We can make the while loop to terminate after N queues so that we process up to N queues
+        shovel_queue $queue
+      done <$TEMP/queues_to_shovel
+    else
+      echo "  Reached maximum active shovels. Postpone scheduling $TODO shovels. "
+    fi
+
+  else
+    echo "  There are no queues to transfer"
+  fi
+}
+terminate_transfer_of_orphaned_messages() {
+  echo "Terminate transfer of orphaned messages"
+
+  get "/api/shovels" | jq -r '"\(.[].src_queue),"' | sort > $TEMP/queues_with_shovel
+  if [ -f "$TEMP/queues_with_shovel" ] && [ -s "$TEMP/queues_with_shovel" ]
+  then
+    grep -Ff $TEMP/queues_with_shovel $TEMP/federated_empty_queues > $TEMP/federated_empty_with_shovel
+  else
+    touch $TEMP/federated_empty_with_shovel
+  fi
+
+  if [ -f "$TEMP/federated_empty_with_shovel" ] && [ -s "$TEMP/federated_empty_with_shovel" ]
+  then
+    cat $TEMP/federated_empty_with_shovel | awk '{print "transfer-"$3 $2}' | tr ',' ' ' > $TEMP/shovels_to_delete
+    while read shovel; do
+      delete_shovel $shovel
+    done <$TEMP/shovels_to_delete
+  fi
+
+}
+
+### Utility functions
+
+get() {
+  curl -s -u ${HTTP_SOURCE_CREDENTIALS} ${HTTP_SOURCE_CLUSTER}${1}
+}
+post() {
+  curl -s -X POST -H "content-type:application/json" \
+    -u ${HTTP_SOURCE_CREDENTIALS} ${HTTP_SOURCE_CLUSTER}${1} \
+    -d $2
+}
+put() {
+  curl -s -X PUT -H "content-type:application/json" \
+    -u ${HTTP_SOURCE_CREDENTIALS} ${HTTP_SOURCE_CLUSTER}${1} \
+    -d $2
+}
+delete() {
+  curl -s -X DELETE -u ${HTTP_SOURCE_CREDENTIALS} ${HTTP_SOURCE_CLUSTER}${1} &>/dev/null
+}
+urlencode() {
+    local length="${#1}"
+    for (( i = 0; i < length; i++ )); do
+        local c="${1:i:1}"
+        case $c in
+            [a-zA-Z0-9.~_-]) printf "$c" ;;
+            *) printf '%%%02X' "'$c"
+        esac
+    done
+}
+urldecode() {
+    local url_encoded="${1//+/ }"
+    printf '%b' "${url_encoded//%/\\x}"
+}
+
+
+main

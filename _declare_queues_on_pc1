@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+
+set -eu
+
+_VHOST=${VHOST:-%2F}
+URI="amqp://guest:guest@localhost:5672/${_VHOST}"
+HTTP_URI="localhost:15672"
+
+PERF_TEST_VERSION=2.9.0
+
+if [ ! -f rabbitmq-perf-test-${PERF_TEST_VERSION}-bin.tar.gz  ]
+then
+  wget https://github.com/rabbitmq/rabbitmq-perf-test/releases/download/v${PERF_TEST_VERSION}/rabbitmq-perf-test-${PERF_TEST_VERSION}-bin.tar.gz
+  tar xvzf rabbitmq-perf-test-${PERF_TEST_VERSION}-bin.tar.gz
+fi
+
+echo "Creating vhost ${_VHOST} on ${HTTP_URI} ..."
+if [ ! -z ${_VHOST} ]; then curl -u guest:guest -X PUT ${HTTP_URI}/api/vhosts/${_VHOST}; fi
+
+echo "Creating federation-upstream akt on ${HTTP_URI} ..."
+curl -u guest:guest -X PUT ${HTTP_URI}/api/parameters/federation-upstream/${_VHOST}/akt -d '{"value":{"uri":"amqp://localhost/akt","expires":3600000}}'
+
+echo "Creating policy 'federate-with-akt' on ${HTTP_URI} ..."
+curl -u guest:guest -X PUT ${HTTP_URI}/api/policies/${_VHOST}/federate-with-akt \
+  -d '{"pattern": "^perf-test-","definition": {"federation-upstream":"akt"},"priority": 1,"apply-to": "queues"}'
+
+echo "Declaring queues to ${URI} ..."
+rabbitmq-perf-test-${PERF_TEST_VERSION}/bin/runjava com.rabbitmq.perf.PerfTest \
+  --uri "$URI" \
+  --flag 'persistent' \
+  --auto-delete 'false' \
+  --queue-pattern 'perf-test-%d' \
+  --queue-pattern-from 1 --queue-pattern-to 10 \
+  --producers 0 --consumers 10 --time 2

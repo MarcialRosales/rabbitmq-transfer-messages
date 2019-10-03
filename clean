@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+TEMP=`mktemp -d "$DIR/tmp/XXXX"`
+echo "> Temporary files generated under $TEMP"
+
+HTTP_URI="localhost:15673"
+
+delete_queue() {
+  name=$1
+  vhost=$2
+  vhost_url_encoded=$(urlencode $vhost)
+  curl -s -X DELETE -u guest:guest ${HTTP_URI}/api/queues/$vhost_url_encoded/$name && echo " Succesfully deleted queue $name"
+}
+delete_queues() {
+  curl -s -u guest:guest ${HTTP_URI}/api/queues | jq -r '.[] | "\(.name) \(.vhost)"' > $TEMP/queues
+  grep perf-test $TEMP/queues > $TEMP/queues_to_delete
+  while read queue; do
+    delete_queue $queue
+  done <$TEMP/queues_to_delete
+}
+urlencode() {
+    local length="${#1}"
+    for (( i = 0; i < length; i++ )); do
+        local c="${1:i:1}"
+        case $c in
+            [a-zA-Z0-9.~_-]) printf "$c" ;;
+            *) printf '%%%02X' "'$c"
+        esac
+    done
+}
+
+delete_queues
