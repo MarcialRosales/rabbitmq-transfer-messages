@@ -1,10 +1,19 @@
 # Transfer orphaned messages from DR dc to Main dc
 
-The objective of this gist is to provide an script that transfer orphaned messages left
-in a RabbitMQ cluster (`OKR`) in the DR data center (`LTM`) back to the
-same RabbitMQ cluster (`OKR`) but in the Main data center (`PC1`).
+The objective of this repository is first of all to provide an script that transfer messages from one cluster to
+another and second to demonstrate how to run it.
 
-In a nutshell, this is the set up :
+The script will ONLY transfer all messages on queues, on any vhost, which are federated. It WILL NOT transfer messages on non-federated queues. Before the script initiates the transfer it first disables the federation upstream associated to the non-empty
+federated queues. It will do it by cloning the upstream with a different name and deleting the original one.
+Once the federation upstreams are disabled, it schedules one shovel per queue. However, we can limit the maximum number of
+active shovels so that we do not overload RabbitMQ should we had thousand of queues.
+
+It is important to understand the reason why we need to disable the federation upstream associated to the queues we want to
+transfer. The upstream queue will forward messages to the downstream queues if there are consumers. A shovel is indeed a AMQP consumer and producer running within RabbitMQ. If we did not disable the federation upstream, the queues will keep getting
+messages from upstream making it impossible to drain them.
+
+To demonstrate the `transfer` script we have used the following deployment scenario commonly found in production environments. We are not going to exactly reproduce it but it helps to understand the context:
+
   - We have two data centers. The Main dc called `PC1` and DR dc called `LTM`
     ```
        PC1 DC                   LTM DC
@@ -12,7 +21,7 @@ In a nutshell, this is the set up :
 
     ```
 
-  - We have a RabbitMQ cluster called `OKR` in both data centers
+  - We have a RabbitMQ cluster called `OKR` in both data centers. To demonstrate this deployment scenario, we are going to deploy two standalone RabbitMQ nodes when we run the script `rabbit/deploy`. We will run these two RabbitMQ nodes in Docker.
     ```
        PC1 DC                   LTM DC
      -----------------      -------------
@@ -24,7 +33,7 @@ In a nutshell, this is the set up :
     ```
 
   - Both `OKR` clusters have a federation queue link with an upstream RabbitMQ cluster called `ART`. This federation link forwards messages from `ART` cluster to the `OKR` cluster which has consumer applications.
-    > We have skipped the exact details of how messages are forwarded. Check out RabbitMQ federation docs if you want to know more about it.
+    > We are not going to deploy the ART cluster as it is not necessary.
 
 
     ```
@@ -37,7 +46,9 @@ In a nutshell, this is the set up :
       OKR RMQ cluster         OKR RMQ cluster
 
     ```
-  - Applications access `OKR` clusters via a Load Balancer (`LB`) which points to the `OKR` cluster in the active dc. Typically, the active dc is `PC1`
+  - Applications access `OKR` clusters via a Load Balancer (`LB`) which points to the `OKR` cluster in the active dc. Typically, the active dc is `PC1`.
+    > We are not going to deploy apps and an LB as it is not necessary.
+
     ```
        PC1 DC                   LTM DC
      -----------------      -------------
@@ -69,6 +80,7 @@ This is what happens when the Load Balancer switches back to `PC1` dc:
   - Messages will flow now from `ART` cluster to `OKR` cluster in `LTM` dc
   - Any message produced and not consumed in `OKR` in `LTM` will stay there. These are what we call the orphaned messages.
   - We cannot shovel the messages from `LTM` to `PC1` because that would trigger the flow of messages from `AKT` cluster down to `OKR` in `LTM`. This is because shovel creates a local AMQP consumer which automatically triggers the flow of messages from `AKT`.
+
 
 The proposed solution is to transfer those orphaned messages while preventing incoming messages from `AKT`. The script performs the following operations at the cluster level, i.e. across all vhosts:
   - Disable the federation upstreams (with `AKT`). It disconnects the cluster from the fictitious `AKT` cluster .
