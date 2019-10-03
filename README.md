@@ -4,13 +4,11 @@ The objective of this repository is first of all to provide an script that trans
 another and second to demonstrate how to run it.
 
 The script will ONLY transfer all messages on queues, on any vhost, which are federated. It WILL NOT transfer messages on non-federated queues. Before the script initiates the transfer it first disables the federation upstream associated to the non-empty
-federated queues. It will do it by cloning the upstream with a different name and deleting the original one.
-Once the federation upstreams are disabled, it schedules one shovel per queue. However, we can limit the maximum number of
+federated queues. It will do it by cloning the federation upstream with a different name and deleting the original one.
+Once all the federation upstreams are disabled, it schedules one shovel per queue. However, we can limit the maximum number of
 active shovels so that we do not overload RabbitMQ should we had thousand of queues.
 
-It is important to understand the reason why we need to disable the federation upstream associated to the queues we want to
-transfer. The upstream queue will forward messages to the downstream queues if there are consumers. A shovel is indeed a AMQP consumer and producer running within RabbitMQ. If we did not disable the federation upstream, the queues will keep getting
-messages from upstream making it impossible to drain them.
+It is important to understand the reason why we need to disable the federation upstream. The upstream queue will forward messages to the downstream queues if they have consumers. A shovel is indeed a AMQP consumer and a producer running within RabbitMQ. If we did not disable the federation upstream, the upstream queue will keep sending messages to the downstream queues make it impossible to drain them.
 
 To demonstrate the `transfer` script we have used the following deployment scenario commonly found in production environments. We are not going to exactly reproduce it but it helps to understand the context:
 
