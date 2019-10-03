@@ -1,4 +1,4 @@
-# Transfer messages between RabbitMQ clusters 
+# Transfer messages between RabbitMQ clusters
 
 The objective of this repository is first of all to provide an script that transfer messages from one cluster to
 another and second to demonstrate how to run it.
@@ -141,7 +141,7 @@ We start the transfer of orphaned message by invoking the command below. But fir
 - `HTTP_SOURCE_CLUSTER` [**Required**] This is the http url of the source cluster (the one with the messages).
     In our case, it is `http://localhost:15673`
 
-- `HTTP_SOURCE_CREDENTIALS` [**Required**] These are the http credentials in the source cluster in the form of `username:password`. In our case it is `guest:guest`.
+- `HTTP_SOURCE_CREDENTIALS` [**Required**] These are the http credentials in the source cluster in the form of `username:password`. The credentials MUST correspond to an administrator user as the transfer script will work across the entire cluster. In our case it is `guest:guest`.
 
 - `AMQP_TARGET_CLUSTER` [**Required**] This is the AMQP url of the target cluster (where we want to transfer messages to)
     In our case, it is `amqp://pc1-okr-rabbitmq`. Both RabbitMQ nodes have a name in Docker. This AMQP url is used by one node to connect to the other. Hence we are going to use their own DNS names assigned by us when we deployed them.
