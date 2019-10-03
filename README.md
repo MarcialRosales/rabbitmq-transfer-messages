@@ -233,11 +233,19 @@ Enable Federation upstreams
  Succesfully deleted upstream akt-to-restore
 ```
 
-## 5. Teardown clusters
+## 5. Teardown clusters or re-run the demonstration again
 
-Run the following script to un-deploy both RabbitMQ nodes.
+To tear down the cluster just run:
 ```
 $ rabbit/undeploy
+```
+
+If you want to run the demonstration again, all you need to do repeat the same commands right from the start:
+```
+$ rabbit/deploy
+$ ./setup_vhost_in_both_clusters
+$ VHOST=vhost-1 ./setup_vhost_in_both_clusters
+$ ./transfer
 ```
 
 ## About the `_idempotent_transfer` script invoked by the `transfer` script
